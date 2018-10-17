@@ -1,5 +1,10 @@
 package mapreduce
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 func doReduce(
 	jobName string, // the name of the whole MapReduce job
 	reduceTask int, // which reduce task this is
@@ -44,4 +49,8 @@ func doReduce(
 	//
 	// Your code here (Part I).
 	//
+
+	for i := 0; i < nMap; i++ {
+		filename := fmt.Sprintf("mrtmp.xxx-%d-%d", i, reduceTask)
+	}
 }
