@@ -1,6 +1,17 @@
 package mapreduce
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
+
+type WorkersMgr struct {
+	sync.Mutex
+	workers []string
+	nFree   int
+}
+
+var freeWorkers []string
 
 //
 // schedule() starts and waits for all tasks in the given phase (mapPhase
@@ -30,5 +41,39 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	//
 	// Your code here (Part III, Part IV).
 	//
+	var wg sync.WaitGroup
+	nLeftTasks := ntasks
+	for nLeftTasks > 0 {
+		freeCnt := len(freeWorkers)
+		if l > 0 {
+			worker := freeWorkers[freeCnt-1]
+			freeWorkers = freeWorkers[:freeCnt-1]
+			taskArg := DoTaskArgs{
+				jobName:       jobName,
+				Phase:         phase,
+				TaskNumber:    ntasks - nLeftTasks,
+				NumOtherPhase: n_other,
+			}
+			if phase == "mapPhase" {
+				taskArg.File = mapFiles[ntasks-nLeftTasks]
+			}
+
+			go submitTask(worker, taskArg, registerChan, wg)
+
+		} else {
+
+		}
+	}
+
 	fmt.Printf("Schedule: %v done\n", phase)
+}
+
+func submitTask(worker string, arg DoTaskArgs, doneChan chan string, wg *sync.WaitGroup) {
+	wg.Add(1)
+	ok := call(worker, "Worker.DoTask", arg, new(struct{}))
+	if ok == false {
+		fmt.Printf("Master: RPC %s doTask error\n", worker)
+	} else {
+		doneChan <- worker
+	}
 }
