@@ -3,6 +3,8 @@ package mapreduce
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"sort"
 )
 
 func doReduce(
@@ -49,8 +51,59 @@ func doReduce(
 	//
 	// Your code here (Part I).
 	//
-
+	fmt.Printf("doReduce..reduceTask:%d, nMap:%d, output file:%s\n", reduceTask, nMap, outFile)
+	var kvs []KeyValue
 	for i := 0; i < nMap; i++ {
-		filename := fmt.Sprintf("mrtmp.xxx-%d-%d", i, reduceTask)
+		filename := reduceName(jobName, i, reduceTask)
+		f, err := os.OpenFile(filename, os.O_RDONLY, 0766)
+		if err != nil {
+			fmt.Printf("open %s err:%v\n", filename, err)
+			return
+		}
+
+		jsonDec := json.NewDecoder(f)
+		for {
+			var kv KeyValue
+			err := jsonDec.Decode(&kv)
+			if err != nil {
+				break
+			}
+			kvs = append(kvs, kv)
+		}
+		f.Close()
 	}
+
+	sort.SliceStable(kvs, func(i, j int) bool { return kvs[i].Key < kvs[j].Key })
+
+	outf, err := os.OpenFile(outFile, os.O_RDWR|os.O_CREATE, 0766)
+	if err != nil {
+		fmt.Printf("open outFile error:%v", err)
+		return
+	}
+	defer outf.Close()
+	jsonEnc := json.NewEncoder(outf)
+
+	var key string
+	var values []string
+	for _, kv := range kvs {
+		if kv.Key != key { //hit a new key
+			if len(values) > 0 { //encode reduce output into output file
+				if err := jsonEnc.Encode(KeyValue{key, reduceF(key, values)}); err != nil {
+					fmt.Printf("json Encode into file err:%v\n", err)
+					return
+				}
+				values = nil
+			}
+			key = kv.Key
+		}
+		values = append(values, kv.Value)
+	}
+	if len(values) > 0 { //encode reduce output into output file
+		if err := jsonEnc.Encode(KeyValue{key, reduceF(key, values)}); err != nil {
+			fmt.Printf("json Encode into file err:%v\n", err)
+			return
+		}
+		values = nil
+	}
+
 }

@@ -72,7 +72,7 @@ func doMap(
 	var jsonEnc []*json.Encoder
 	var files []*os.File
 	for i := 0; i < nReduce; i++ {
-		fileName := fmt.Sprintf("mrtmp.xxx-%d-%d", mapTask, i)
+		fileName := reduceName(jobName, mapTask, i)
 		f, err := os.OpenFile(fileName, os.O_CREATE|os.O_RDWR, 0766)
 		if err != nil {
 			fmt.Printf("open file %s err:%v\n", fileName, err)
