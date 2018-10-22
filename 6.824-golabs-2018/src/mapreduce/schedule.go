@@ -83,6 +83,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 			taskArg := unsubmitTaskList[len(unsubmitTaskList)-1]
 			unsubmitTaskList = unsubmitTaskList[:len(unsubmitTaskList)-1]
 			handlingTaskMap[taskArg.JobName] = taskArg
+
 			wg.Add(1)
 			go submitTask(worker, taskArg, freeChan, &wg)
 		} else { // no free worker, wait for new registered worker or job done worker
