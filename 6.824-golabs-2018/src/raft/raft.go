@@ -84,10 +84,12 @@ type Raft struct {
 	nextIndex  []int
 	matchIndex []int
 
-	chStopHeartBeat chan int
-	chElectTimer    chan int
-	grantVotes      int
-	failedRpcVotes  int
+	chHeartBeat    chan int
+	chElectTimer   chan int
+	grantVotes     int
+	failedRpcVotes int
+
+	hbTimerCnt int
 }
 
 // return currentTerm and whether this server
@@ -180,14 +182,24 @@ type RequestAppendEntriesReply struct {
 	Success bool
 }
 
+func (rf *Raft) switchToFollower(term int) {
+	rf.currentTerm = term
+	rf.state = STATE_FOLLOWER
+	rf.grantVotes = 0
+	rf.votedFor = -1
+}
+
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	reply.Term = rf.currentTerm
-
-	if args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
+		DPrintf("%d reject %d vote request, because its term(%d) is larger than request term(%d)", rf.me, args.CandidateId, rf.currentTerm, args.Term)
+		goto end
+	} else if args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		reply.VoteGranted = false
 		DPrintf("%d reject %d vote request, because it voted for %d in term %d", rf.me, args.CandidateId, rf.votedFor, rf.currentTerm)
 		goto end
@@ -233,11 +245,14 @@ end:
 	if args.Term > currentTerm {
 		rf.currentTerm = args.Term
 		rf.state = STATE_FOLLOWER
+		rf.grantVotes = 0
+		rf.failedRpcVotes = 0
 		rf.mu.Unlock()
 		//leader switch to follower, stop heartbeat timer
 		if currentState == STATE_LEADER {
+			rf.votedFor = -1
 			DPrintf("%d switch to follwer because recv larger term(%d) vote request from %d", rf.me, args.Term, args.CandidateId)
-			rf.chStopHeartBeat <- 0
+			rf.chHeartBeat <- 0
 			rf.chElectTimer <- ELECT_TIMER_START
 		}
 	} else {
@@ -265,8 +280,11 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntriesArgs, reply *Requ
 		rf.state = STATE_FOLLOWER
 		rf.mu.Unlock()
 		if state == STATE_LEADER {
-			rf.chStopHeartBeat <- 0
+			rf.chHeartBeat <- 0
 			rf.chElectTimer <- ELECT_TIMER_START
+			rf.votedFor = -1
+			rf.failedRpcVotes = 0
+			rf.grantVotes = 0
 			DPrintf("%d switch to follwer because recv larger term(%d) AppendEntries request from %d", rf.me, args.Term, args.LeaderId)
 		}
 
@@ -379,6 +397,7 @@ func (rf *Raft) Kill() {
 func (rf *Raft) Vote(id int, req *RequestVoteArgs, wg *sync.WaitGroup) {
 	defer wg.Done()
 	var reply RequestVoteReply
+	DPrintf("node %d send vote to %d, state=%d", rf.me, id, rf.state)
 	ok := rf.sendRequestVote(id, req, &reply)
 	if !ok {
 		DPrintf("node %d send vote rpc to node %d failed", rf.me, id)
@@ -399,6 +418,10 @@ func (rf *Raft) Vote(id int, req *RequestVoteArgs, wg *sync.WaitGroup) {
 		if reply.Term > rf.currentTerm {
 			rf.state = STATE_FOLLOWER
 			rf.currentTerm = reply.Term
+			rf.votedFor = -1
+			rf.failedRpcVotes = 0
+			rf.grantVotes = 0
+			DPrintf("node %d switch from candidate to follower because recv larger term(%d) vote reply from %d", rf.me, reply.Term, id)
 		}
 		rf.mu.Unlock()
 	}
@@ -407,7 +430,7 @@ func (rf *Raft) Vote(id int, req *RequestVoteArgs, wg *sync.WaitGroup) {
 func (rf *Raft) BroadcastVoteRequest() {
 	var req RequestVoteArgs
 
-	DPrintf("node %d broad cast vote requests", rf.me)
+	DPrintf("node %d broad cast vote requests, state=%d", rf.me, rf.state)
 	//switch to candidate
 	rf.mu.Lock()
 	rf.state = STATE_CANDIDATE
@@ -452,7 +475,8 @@ func (rf *Raft) BroadcastVoteRequest() {
 		go rf.BroadcastAppendEntriesRequest()
 
 		//start heartbeat timer
-		go HeartbeatTimer(rf)
+		//go rf.HeartbeatTimer()
+		rf.chHeartBeat <- 1
 	} else {
 		rf.mu.Unlock()
 	}
@@ -461,6 +485,7 @@ func (rf *Raft) BroadcastVoteRequest() {
 
 func (rf *Raft) AppendEntries(id int, req *RequestAppendEntriesArgs) {
 	var reply RequestAppendEntriesReply
+	DPrintf("node %d send append entries to %d", rf.me, id)
 	ok := rf.sendRequestAppendEntries(id, req, &reply)
 	if !ok {
 		DPrintf("node %d recv append entries reply from %d FAILED! ", rf.me, id)
@@ -469,14 +494,18 @@ func (rf *Raft) AppendEntries(id int, req *RequestAppendEntriesArgs) {
 
 	DPrintf("node %d recv append entries reply from %d:%v ", rf.me, id, reply)
 	if reply.Success {
+
 	} else {
 		rf.mu.Lock()
 		if reply.Term > rf.currentTerm {
 			DPrintf("node %d swith to follower because append entry reply has larger term(%d)", rf.me, reply.Term)
 			rf.currentTerm = reply.Term
 			rf.state = STATE_FOLLOWER
+			rf.votedFor = -1
+			rf.failedRpcVotes = 0
+			rf.grantVotes = 0
 			rf.mu.Unlock()
-			rf.chStopHeartBeat <- 0
+			rf.chHeartBeat <- 0
 			rf.chElectTimer <- ELECT_TIMER_START
 		} else {
 			rf.mu.Unlock()
@@ -487,7 +516,7 @@ func (rf *Raft) AppendEntries(id int, req *RequestAppendEntriesArgs) {
 func (rf *Raft) BroadcastAppendEntriesRequest() {
 	var req RequestAppendEntriesArgs
 
-	DPrintf("node %d broad cast heartbeat", rf.me)
+	DPrintf("node %d broad cast heartbeat, state=%d, hbtimer cnt=%d", rf.me, rf.state, rf.hbTimerCnt)
 
 	rf.mu.Lock()
 	req.LeaderCommit = rf.commitIndex
@@ -502,24 +531,33 @@ func (rf *Raft) BroadcastAppendEntriesRequest() {
 	}
 }
 
-func HeartbeatTimer(rf *Raft) {
-	period := 150
-	timer := time.NewTimer(time.Millisecond * time.Duration(period))
+func (rf *Raft) HeartbeatTimer() {
+	var cmd int
+	rf.hbTimerCnt++
+	period := time.Millisecond * time.Duration(150)
+	timer := time.NewTimer(period)
+	timer.Stop()
+
 	for {
 		select {
 		case <-timer.C:
 			DPrintf("%d reset heartbeat timer", rf.me)
-			timer.Reset(time.Millisecond * time.Duration(period))
+			timer.Reset(period)
 			go rf.BroadcastAppendEntriesRequest()
-		case <-rf.chStopHeartBeat:
-			DPrintf("%d stop heartbeat timer", rf.me)
-			timer.Stop()
-			break
+		case cmd = <-rf.chHeartBeat:
+			if cmd == 0 {
+				DPrintf("%d stop heartbeat timer", rf.me)
+				timer.Stop()
+			} else {
+				DPrintf("%d start heartbeat timer", rf.me)
+				timer.Reset(period)
+			}
 		}
 	}
+	rf.hbTimerCnt--
 }
 
-func electTimer(rf *Raft) {
+func (rf *Raft) electTimer() {
 	var cmd int
 
 	electTimeout := 500 + rand.Intn(300)
@@ -568,10 +606,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.state = STATE_FOLLOWER
 
-	rf.chElectTimer = make(chan int)
-	rf.chStopHeartBeat = make(chan int)
+	rf.hbTimerCnt = 0
 
-	go electTimer(rf)
+	rf.chElectTimer = make(chan int)
+	rf.chHeartBeat = make(chan int)
+
+	go rf.electTimer()
+	go rf.HeartbeatTimer()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
