@@ -89,7 +89,23 @@ type Raft struct {
 	grantVotes     int
 	failedRpcVotes int
 
+	chApplyMsg chan ApplyMsg
+
 	hbTimerCnt int
+}
+
+func (rf *Raft) getLogEntry(index int) raftLogEntry {
+	return rf.log[index-1]
+}
+
+func (rf *Raft) getLastIndexAndTerm() (int, int) {
+	if len(rf.log) == 0 {
+		return 0, 0
+	}
+
+	lastLogIndex := len(rf.log) + 1
+	lastTerm := rf.getLogEntry(lastLogIndex).term
+	return lastLogIndex, lastTerm
 }
 
 // return currentTerm and whether this server
@@ -178,15 +194,18 @@ type RequestAppendEntriesArgs struct {
 }
 
 type RequestAppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term      int
+	NextIndex int
+	Success   bool
 }
 
-func (rf *Raft) switchToFollower(term int) {
-	rf.currentTerm = term
+func (rf *Raft) switchToFollower() {
 	rf.state = STATE_FOLLOWER
-	rf.grantVotes = 0
 	rf.votedFor = -1
+	rf.failedRpcVotes = 0
+	rf.grantVotes = 0
+	rf.chHeartBeat <- 0
+	rf.chElectTimer <- ELECT_TIMER_START
 }
 
 //
@@ -273,6 +292,7 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntriesArgs, reply *Requ
 		rf.mu.Unlock()
 		reply.Success = false
 		DPrintf("node %d reject RequestAppendEntries from %d, because currentTerm(%d) > request term(%d)", rf.me, args.LeaderId, rf.currentTerm, args.Term)
+		return
 	} else if rf.currentTerm < args.Term {
 		reply.Success = true
 		rf.currentTerm = args.Term
@@ -280,11 +300,7 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntriesArgs, reply *Requ
 		rf.state = STATE_FOLLOWER
 		rf.mu.Unlock()
 		if state == STATE_LEADER {
-			rf.chHeartBeat <- 0
-			rf.chElectTimer <- ELECT_TIMER_START
-			rf.votedFor = -1
-			rf.failedRpcVotes = 0
-			rf.grantVotes = 0
+			rf.switchToFollower()
 			DPrintf("%d switch to follwer because recv larger term(%d) AppendEntries request from %d", rf.me, args.Term, args.LeaderId)
 		}
 
@@ -301,6 +317,7 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntriesArgs, reply *Requ
 		}
 		rf.mu.Unlock()
 	}
+
 }
 
 //
@@ -610,6 +627,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.chElectTimer = make(chan int)
 	rf.chHeartBeat = make(chan int)
+	rf.chApplyMsg = applyCh
 
 	go rf.electTimer()
 	go rf.HeartbeatTimer()
